@@ -35,5 +35,5 @@ Anyway it gives you time to 7zipped the dump if 7z is installed.
  ."C:\Program Files\7-Zip\7z.exe" a "C:\Windows\Temp\du_du.dux.7z" "C:\Windows\Temp\du_du.dux"
 ```
 
-
+In case 7z is not installed you can download/use new simplified console version 7zr.exe binary from [7z](https://7-zip.org/download.html)
 
