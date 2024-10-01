@@ -2,7 +2,7 @@
 
 Uses [DInvoke](https://github.com/TheWover/DInvoke)  from [TheWover](https://github.com/TheWover) to invoke dynamically MiniDumpWriteDump function and dump LSASS process memory.
 
-It also uses DInvoke  for calling all the Native APIs needed.
+It also uses DInvoke  for calling all the Native APIs needed. Dump is directly processed from memory to a compressed file to minimize detection using a callback function in MiniDumpWriteDump thanks to callback code in  [https://github.com/ricardojoserf/lsass-dumper-csharp](https://github.com/ricardojoserf/lsass-dumper-csharp) 
 
 --------------------------
 
@@ -13,27 +13,12 @@ It is necessary to have SeDebugPrivilege. You can use basic scripts from [pwshSe
 ```
 .\DMiniDumpWrite
 ```
-Dump file is saved to C:\Windows\Temp\du_du.dux
+Dump file is saved to dump.dmp.gz
 
 Dump file can be processed with pypykatz:
 
 ```
-pypykatz lsa minidump du_du.dux
+pypykatz lsa minidump dump.dmp
 ```
 
 It is also recommended to protect the assembly with [ConfuserEx](https://github.com/yck1509/ConfuserEx) tool to avoid signature detection.
-
-------
-
-### LSASS is flagged
-
-This project was a try to  understand and implement DInvoke framework with the target of creating an unflagged LSASS dump using MiniDumpWriteDump, but it is flagged when filehandle is closed.
-
-Anyway it gives you time to 7zipped the dump if 7z is installed.
-
-```
- ."C:\Program Files\7-Zip\7z.exe" a "C:\Windows\Temp\du_du.dux.7z" "C:\Windows\Temp\du_du.dux"
-```
-
-In case 7z is not installed you can download/use new simplified console version 7zr.exe binary from [7z](https://7-zip.org/download.html)
-
